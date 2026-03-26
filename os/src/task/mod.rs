@@ -13,6 +13,7 @@ mod context;
 mod switch;
 #[allow(clippy::module_inception)]
 mod task;
+mod trace;
 
 use crate::config::MAX_APP_NUM;
 use crate::loader::{get_num_app, init_app_cx};
@@ -20,6 +21,7 @@ use crate::sync::UPSafeCell;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
+pub use trace::Trace;
 
 pub use context::TaskContext;
 
@@ -45,6 +47,8 @@ pub struct TaskManagerInner {
     tasks: [TaskControlBlock; MAX_APP_NUM],
     /// id of current `Running` task
     current_task: usize,
+    /// trace
+    trace: [Trace; MAX_APP_NUM],
 }
 
 lazy_static! {
@@ -65,6 +69,7 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                trace: [Trace::new(); MAX_APP_NUM],
                 })
             },
         }
@@ -168,4 +173,71 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// write syscall
+const SYSCALL_WRITE: usize = 64;
+/// exit syscall
+const SYSCALL_EXIT: usize = 93;
+/// yield syscall
+const SYSCALL_YIELD: usize = 124;
+/// gettime syscall
+const SYSCALL_GET_TIME: usize = 169;
+/// trace syscall
+const SYSCALL_TRACE: usize = 410;
+
+/// Increase the count for a specific syscall in the current task's trace.
+///
+/// # Arguments
+/// * `syscall` - The syscall ID to increment the count for
+pub fn increase_syscall_trace(syscall: usize) {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    let trace = &mut inner.trace[current];
+    match syscall {
+        SYSCALL_WRITE => trace.write += 1,
+        SYSCALL_EXIT => trace.exit += 1,
+        SYSCALL_YIELD => trace.yield_ += 1,
+        SYSCALL_GET_TIME => trace.get_time += 1,
+        SYSCALL_TRACE => trace.trace += 1,
+        _ => {}
+    }
+}
+
+/// Get the count for a specific syscall in the current task's trace.
+///
+/// # Arguments
+/// * `syscall` - The syscall ID to get the count for
+///
+/// # Returns
+/// The count of how many times the specified syscall has been called
+pub fn get_syscall_trace(syscall: usize) -> usize {
+    let inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    let trace = &inner.trace[current];
+    match syscall {
+        SYSCALL_WRITE => trace.write,
+        SYSCALL_EXIT => trace.exit,
+        SYSCALL_YIELD => trace.yield_,
+        SYSCALL_GET_TIME => trace.get_time,
+        SYSCALL_TRACE => trace.trace,
+        _ => {
+            panic!("Unknown trace request: syscall id:{}", syscall);
+        }
+    }
+}
+
+/// Clear all syscall trace counts for the current task.
+///
+/// This function resets all syscall counters (write, exit, yield, get_time, trace)
+/// to zero for the currently running task.
+pub fn clean_syscall_trace() {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    let trace = &mut inner.trace[current];
+    trace.write = 0;
+    trace.exit = 0;
+    trace.yield_ = 0;
+    trace.get_time = 0;
+    trace.trace = 0;
 }
