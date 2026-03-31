@@ -1,5 +1,13 @@
 //! Process management syscalls
-use crate::task::{change_program_brk, exit_current_and_run_next, suspend_current_and_run_next};
+use crate::{
+    config::PAGE_SIZE,
+    mm::{PageTable, VirtAddr, VirtPageNum},
+    task::{
+        change_program_brk, current_user_token, exit_current_and_run_next,
+        suspend_current_and_run_next,
+    },
+    timer::get_time_us,
+};
 
 #[repr(C)]
 #[derive(Debug)]
@@ -25,9 +33,72 @@ pub fn sys_yield() -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!("kernel: sys_get_time");
-    -1
+    if ts.is_null() {
+        return -1;
+    }
+
+    let va = VirtAddr::from(ts as usize);
+    let page_table = PageTable::from_token(current_user_token());
+
+    let first_ppn = {
+        if let Some(pte) = page_table.translate(va.floor()) {
+            if pte.is_valid() && pte.writable() {
+                pte.ppn()
+            } else {
+                return -1;
+            }
+        } else {
+            return -1;
+        }
+    };
+
+    let second_ppn = {
+        if va.page_offset() + core::mem::size_of::<TimeVal>() > PAGE_SIZE {
+            let next_vpn = VirtPageNum(va.floor().0 + 1);
+            if let Some(pte) = page_table.translate(next_vpn) {
+                if pte.is_valid() && pte.writable() {
+                    Some(pte.ppn())
+                } else {
+                    return -1;
+                }
+            } else {
+                return -1;
+            }
+        } else {
+            None
+        }
+    };
+
+    let time_val_bytes = {
+        let us = get_time_us();
+        let time_val = TimeVal {
+            sec: us / 1_000_000,
+            usec: us % 1_000_000,
+        };
+        unsafe {
+            core::slice::from_raw_parts(
+                &time_val as *const _ as *const u8,
+                core::mem::size_of::<TimeVal>(),
+            )
+        }
+    };
+
+    let first_len = time_val_bytes.len().min(PAGE_SIZE - va.page_offset());
+
+    let first_offset = va.page_offset();
+    let first_page_bytes = first_ppn.get_bytes_array();
+    first_page_bytes[first_offset..first_offset + first_len]
+        .copy_from_slice(&time_val_bytes[..first_len]);
+
+    if let Some(second_ppn) = second_ppn {
+        let rest_len = core::mem::size_of::<TimeVal>() - first_len;
+        let second_page_bytes = second_ppn.get_bytes_array();
+        second_page_bytes[0..rest_len].copy_from_slice(&time_val_bytes[first_len..]);
+    }
+
+    0
 }
 
 /// TODO: Finish sys_trace to pass testcases
