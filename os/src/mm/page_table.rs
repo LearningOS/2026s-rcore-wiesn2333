@@ -1,6 +1,8 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 
-use super::{frame_alloc, FrameTracker, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use crate::mm::address::StepByOne;
+
+use super::{frame_alloc, FrameTracker, PhysPageNum, VirtAddr, VirtPageNum};
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
@@ -162,6 +164,10 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
     let page_table = PageTable::from_token(token);
     let mut start = ptr as usize;
     let end = start + len;
+    if end >= (1usize << 39 - 1) {
+        error!("ptr out of bounds: {:x}", end);
+        return Vec::new();
+    }
     let mut v = Vec::new();
     while start < end {
         let start_va = VirtAddr::from(start);

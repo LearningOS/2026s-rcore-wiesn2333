@@ -1,14 +1,13 @@
 //! Process management syscalls
 use crate::{
     config::PAGE_SIZE,
-    mm::{translated_byte_buffer, MapPermission, VirtAddr},
+    mm::{translated_byte_buffer, MapPermission, PTEFlags, PageTable, VirtAddr},
     task::{
         change_program_brk, current_memory_set, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next,
+        get_syscall_stat, suspend_current_and_run_next,
     },
     timer::get_time_us,
 };
-
 #[repr(C)]
 #[derive(Debug)]
 pub struct TimeVal {
@@ -74,9 +73,44 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
 
 /// TODO: Finish sys_trace to pass testcases
 /// HINT: You might reimplement it with virtual memory management.
-pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
+pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
     trace!("kernel: sys_trace");
-    -1
+    match trace_request {
+        0 => {
+            let va = VirtAddr::from(id);
+            let page_table = PageTable::from_token(current_user_token());
+            let pte = page_table.translate(va.floor());
+            if let Some(pte) = pte {
+                let flags = pte.flags();
+                if flags.contains(PTEFlags::U | PTEFlags::R) {
+                    let byte = pte.ppn().get_bytes_array()[va.page_offset()] as usize;
+                    byte as isize
+                } else {
+                    -1
+                }
+            } else {
+                -1
+            }
+        }
+        1 => {
+            let va = VirtAddr::from(id);
+            let page_table = PageTable::from_token(current_user_token());
+            let pte = page_table.translate(va.floor());
+            if let Some(pte) = pte {
+                let flags = pte.flags();
+                if flags.contains(PTEFlags::U | PTEFlags::W) {
+                    pte.ppn().get_bytes_array()[va.page_offset()] = data as u8;
+                    0
+                } else {
+                    -1
+                }
+            } else {
+                -1
+            }
+        }
+        2 => get_syscall_stat(id) as isize,
+        _ => -1,
+    }
 }
 
 // YOUR JOB: Implement mmap.

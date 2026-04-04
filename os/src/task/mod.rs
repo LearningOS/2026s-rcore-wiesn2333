@@ -128,6 +128,24 @@ impl TaskManager {
         &inner.tasks[current].memory_set as *const MemorySet as *mut MemorySet
     }
 
+    /// Get system call statistics for current task
+    fn get_current_syscall_stats(&self, syscall_id: usize) -> usize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let stats = &mut inner.tasks[current].syscall_stats;
+        let count = stats.entry(syscall_id as u16).or_insert(0);
+        *count
+    }
+
+    /// Increment system call statistics for current task
+    fn increment_current_syscall_stat(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let stats = &mut inner.tasks[current].syscall_stats;
+        let count = stats.entry(syscall_id as u16).or_insert(0);
+        *count += 1;
+    }
+
     /// Get the current 'Running' task's trap contexts.
     fn get_current_trap_cx(&self) -> &'static mut TrapContext {
         let inner = self.inner.exclusive_access();
@@ -214,4 +232,14 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Get system call statistics for current task
+pub fn get_syscall_stat(id: usize) -> usize {
+    TASK_MANAGER.get_current_syscall_stats(id)
+}
+
+/// Increment system call statistics for current task
+pub fn increment_syscall_stat(id: usize) {
+    TASK_MANAGER.increment_current_syscall_stat(id)
 }
