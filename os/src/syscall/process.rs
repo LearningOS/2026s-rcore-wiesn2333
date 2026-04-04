@@ -1,9 +1,9 @@
 //! Process management syscalls
 use crate::{
     config::PAGE_SIZE,
-    mm::{PageTable, VirtAddr, VirtPageNum},
+    mm::{translated_byte_buffer, MapPermission, VirtAddr},
     task::{
-        change_program_brk, current_user_token, exit_current_and_run_next,
+        change_program_brk, current_memory_set, current_user_token, exit_current_and_run_next,
         suspend_current_and_run_next,
     },
     timer::get_time_us,
@@ -40,36 +40,6 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     }
 
     let va = VirtAddr::from(ts as usize);
-    let page_table = PageTable::from_token(current_user_token());
-
-    let first_ppn = {
-        if let Some(pte) = page_table.translate(va.floor()) {
-            if pte.is_valid() && pte.writable() {
-                pte.ppn()
-            } else {
-                return -1;
-            }
-        } else {
-            return -1;
-        }
-    };
-
-    let second_ppn = {
-        if va.page_offset() + core::mem::size_of::<TimeVal>() > PAGE_SIZE {
-            let next_vpn = VirtPageNum(va.floor().0 + 1);
-            if let Some(pte) = page_table.translate(next_vpn) {
-                if pte.is_valid() && pte.writable() {
-                    Some(pte.ppn())
-                } else {
-                    return -1;
-                }
-            } else {
-                return -1;
-            }
-        } else {
-            None
-        }
-    };
 
     let time_val_bytes = {
         let us = get_time_us();
@@ -85,19 +55,20 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
         }
     };
 
-    let first_len = time_val_bytes.len().min(PAGE_SIZE - va.page_offset());
-
-    let first_offset = va.page_offset();
-    let first_page_bytes = first_ppn.get_bytes_array();
-    first_page_bytes[first_offset..first_offset + first_len]
-        .copy_from_slice(&time_val_bytes[..first_len]);
-
-    if let Some(second_ppn) = second_ppn {
-        let rest_len = core::mem::size_of::<TimeVal>() - first_len;
-        let second_page_bytes = second_ppn.get_bytes_array();
-        second_page_bytes[0..rest_len].copy_from_slice(&time_val_bytes[first_len..]);
+    let buffers = translated_byte_buffer(
+        current_user_token(),
+        va.0 as *const u8,
+        core::mem::size_of::<TimeVal>(),
+    );
+    {
+        let mut i = 0;
+        for buffer in buffers {
+            for byte in time_val_bytes.iter() {
+                buffer[i] = *byte;
+                i += 1;
+            }
+        }
     }
-
     0
 }
 
@@ -109,15 +80,77 @@ pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
 }
 
 // YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!("kernel: sys_mmap NOT IMPLEMENTED YET!");
-    -1
+pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
+    trace!(
+        "sys_mmap: start={:#x}, len={:#x}, prot={:#x} (binary:{:b})",
+        start,
+        len,
+        prot,
+        prot
+    );
+
+    if start % PAGE_SIZE != 0 {
+        return -1;
+    }
+    if prot > 0x7 {
+        return -1;
+    }
+    if prot == 0 {
+        return -1;
+    }
+
+    if len == 0 {
+        return 0;
+    }
+
+    let page_count = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+    let mapped_len = page_count * PAGE_SIZE;
+    let end = match start.checked_add(mapped_len) {
+        Some(val) => val,
+        None => {
+            return -1;
+        }
+    };
+
+    let start_va = VirtAddr::from(start);
+    let end_va = VirtAddr::from(end);
+
+    let mut map_perm = MapPermission::U;
+    if prot & 0x1 != 0 {
+        map_perm |= MapPermission::R;
+    }
+    if prot & 0x2 != 0 {
+        map_perm |= MapPermission::W;
+    }
+    if prot & 0x4 != 0 {
+        map_perm |= MapPermission::X;
+    }
+
+    let memory_set = current_memory_set();
+    let result = memory_set.map(start_va, end_va, map_perm);
+    result
 }
 
 // YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!("kernel: sys_munmap NOT IMPLEMENTED YET!");
-    -1
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    if start % PAGE_SIZE != 0 {
+        trace!("sys_munmap: start address not page aligned");
+        return -1;
+    }
+    if len == 0 {
+        trace!("sys_munmap: zero length unmapping");
+        return 0;
+    }
+
+    let page_count = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+    let unmapped_len = page_count * PAGE_SIZE;
+    let end = start + unmapped_len;
+
+    let start_va = VirtAddr::from(start);
+    let end_va = VirtAddr::from(end);
+    let memory_set = current_memory_set();
+    let result = memory_set.unmap(start_va, end_va);
+    result
 }
 /// change data segment size
 pub fn sys_sbrk(size: i32) -> isize {
