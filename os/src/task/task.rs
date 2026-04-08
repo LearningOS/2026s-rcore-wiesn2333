@@ -1,8 +1,8 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::config::{PAGE_SIZE, TRAP_CONTEXT_BASE};
+use crate::mm::{MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
@@ -209,6 +209,49 @@ impl TaskControlBlock {
     /// get pid of process
     pub fn getpid(&self) -> usize {
         self.pid.0
+    }
+
+    /// map memory for the process
+    pub fn map(&self, start: usize, len: usize, port: usize) -> isize {
+        let page_count = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+        let mapped_len = page_count * PAGE_SIZE;
+        let end = match start.checked_add(mapped_len) {
+            Some(val) => val,
+            None => {
+                return -1;
+            }
+        };
+
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(end);
+
+        let mut map_perm = MapPermission::U;
+        if port & 0x1 != 0 {
+            map_perm |= MapPermission::R;
+        }
+        if port & 0x2 != 0 {
+            map_perm |= MapPermission::W;
+        }
+        if port & 0x4 != 0 {
+            map_perm |= MapPermission::X;
+        }
+
+        let mut inner = self.inner_exclusive_access();
+        let result = inner.memory_set.map(start_va, end_va, map_perm);
+        result
+    }
+
+    /// unmap memory for the process
+    pub fn unmap(&self, start: usize, len: usize) -> isize {
+        let page_count = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+        let unmapped_len = page_count * PAGE_SIZE;
+        let end = start + unmapped_len;
+
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(end);
+        let mut inner = self.inner_exclusive_access();
+        let result = inner.memory_set.unmap(start_va, end_va);
+        result
     }
 
     /// change the location of the program break. return None if failed.
