@@ -1,9 +1,9 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{PAGE_SIZE, TRAP_CONTEXT_BASE};
 use crate::fs::{File, Stdin, Stdout};
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::mm::{MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
@@ -229,6 +229,49 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    /// map memory for the process
+    pub fn mmap(&self, start: usize, len: usize, port: usize) -> isize {
+        let page_count = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+        let mapped_len = page_count * PAGE_SIZE;
+        let end = match start.checked_add(mapped_len) {
+            Some(val) => val,
+            None => {
+                return -1;
+            }
+        };
+
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(end);
+
+        let mut map_perm = MapPermission::U;
+        if port & 0x1 != 0 {
+            map_perm |= MapPermission::R;
+        }
+        if port & 0x2 != 0 {
+            map_perm |= MapPermission::W;
+        }
+        if port & 0x4 != 0 {
+            map_perm |= MapPermission::X;
+        }
+
+        let mut inner = self.inner_exclusive_access();
+        let result = inner.memory_set.mmap(start_va, end_va, map_perm);
+        result
+    }
+
+    /// unmap memory for the process
+    pub fn munmap(&self, start: usize, len: usize) -> isize {
+        let page_count = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+        let unmapped_len = page_count * PAGE_SIZE;
+        let end = start + unmapped_len;
+
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(end);
+        let mut inner = self.inner_exclusive_access();
+        let result = inner.memory_set.unmap(start_va, end_va);
+        result
     }
 
     /// get pid of process

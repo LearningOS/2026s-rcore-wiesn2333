@@ -318,6 +318,50 @@ impl MemorySet {
             false
         }
     }
+
+    /// Check if a virtual address range conflicts with existing mappings
+    fn check_range_conflict(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+
+        for area in &self.areas {
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+
+            if !(start_vpn >= area_end || end_vpn <= area_start) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// map a range of virtual addresses to physical frames
+    pub fn mmap(&mut self, start_va: VirtAddr, end_va: VirtAddr, map_perm: MapPermission) -> isize {
+        if self.check_range_conflict(start_va, end_va) {
+            return -1;
+        }
+        let map_area = MapArea::new(start_va, end_va, MapType::Framed, map_perm);
+        self.push(map_area, None);
+        0
+    }
+
+    /// unmap a range of virtual addresses
+    pub fn unmap(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> isize {
+        let start_vpn: VirtPageNum = start_va.floor();
+        let end_vpn: VirtPageNum = end_va.ceil();
+
+        if self
+            .areas
+            .iter_mut()
+            .find(|a| a.vpn_range.get_start() == start_vpn && a.vpn_range.get_end() == end_vpn)
+            .is_some()
+        {
+            self.remove_area_with_start_vpn(start_vpn);
+            0
+        } else {
+            -1
+        }
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
