@@ -183,4 +183,16 @@ impl Inode {
         });
         block_cache_sync_all();
     }
+    /// Check if the inode is a directory
+    pub fn is_dir(&self) -> bool {
+        self.read_disk_inode(|disk_inode| disk_inode.is_dir())
+    }
+    /// Check if the inode is a file
+    pub fn is_file(&self) -> bool {
+        self.read_disk_inode(|disk_inode| disk_inode.is_file())
+    }
+    /// Get the current position in the inode
+    pub fn get_pos(&self) -> (usize, usize) {
+        (self.block_id, self.block_offset)
+    }
 }

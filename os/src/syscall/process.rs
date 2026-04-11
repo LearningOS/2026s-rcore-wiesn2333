@@ -4,7 +4,8 @@ use alloc::sync::Arc;
 
 use crate::{
     fs::{open_file, OpenFlags},
-    mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer},
+    mm::{translated_refmut, translated_str},
+    syscall::util::write_vaddr,
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
         suspend_current_and_run_next,
@@ -117,26 +118,7 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
         sec: us / 1_000_000,
         usec: us % 1_000_000,
     };
-    let time_val_bytes = unsafe {
-        core::slice::from_raw_parts(
-            &time_val as *const _ as *const u8,
-            core::mem::size_of::<TimeVal>(),
-        )
-    };
-    let mut time_val_bytes = time_val_bytes.into_iter();
-
-    let mut buffers = UserBuffer::new(translated_byte_buffer(
-        current_user_token(),
-        ts as *const u8,
-        core::mem::size_of::<TimeVal>(),
-    ))
-    .into_iter();
-
-    while let (Some(dst), Some(src)) = (buffers.next(), time_val_bytes.next()) {
-        unsafe {
-            dst.write(*src);
-        }
-    }
+    write_vaddr(ts as *mut u8, time_val);
 
     0
 }
