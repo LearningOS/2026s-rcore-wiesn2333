@@ -54,9 +54,16 @@ impl OSInode {
         }
         v
     }
+
+    /// link a file to a new name in the current directory
+    pub fn link(&self, file_name: &str, link_name: &str) -> isize {
+        let inner = self.inner.exclusive_access();
+        inner.inode.link(file_name, link_name)
+    }
 }
 
 lazy_static! {
+/// The root inode of the file system
     pub static ref ROOT_INODE: Arc<Inode> = {
         let efs = EasyFileSystem::open(BLOCK_DEVICE.clone());
         Arc::new(EasyFileSystem::root_inode(&efs))
@@ -168,7 +175,7 @@ impl File for OSInode {
             } else {
                 StatMode::FILE
             },
-            nlink: 1,
+            nlink: inode.get_nlink(),
             pad: [0; 7],
         }
     }
