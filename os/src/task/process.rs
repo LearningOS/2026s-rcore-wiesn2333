@@ -9,6 +9,8 @@ use crate::fs::{File, Stdin, Stdout};
 use crate::mm::{translated_refmut, MemorySet, KERNEL_SPACE};
 use crate::sync::{Condvar, Mutex, Semaphore, UPSafeCell};
 use crate::trap::{trap_handler, TrapContext};
+use alloc::collections::btree_map::BTreeMap;
+use alloc::collections::btree_set::BTreeSet;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
@@ -49,6 +51,202 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// deadlock detection
+    pub deadlock_detector: Option<DeadlockDetector>,
+}
+
+/// Deadlock detection
+pub struct DeadlockDetector {
+    /// number of tasks
+    pub t_num: usize,
+    /// number of mutexes
+    pub mutex_num: usize,
+    /// number of semaphores
+    pub sem_num: usize,
+    /// available mutexes
+    pub mutex_available: BTreeSet<usize>,
+    /// allocated mutexes
+    pub mutex_allocated: BTreeMap<usize, BTreeSet<usize>>,
+    /// mutex need
+    pub mutex_need: BTreeMap<usize, BTreeSet<usize>>,
+    /// available semaphores
+    pub sem_available: BTreeMap<usize, usize>, // s_id -> available count
+    /// allocated semaphores
+    pub sem_allocated: BTreeMap<usize, BTreeMap<usize, usize>>, // t_id -> s_id -> count
+    /// semaphore need
+    pub sem_need: BTreeMap<usize, BTreeSet<usize>>, // t_id -> s_id -> need one
+}
+
+/// Tracks a resource operation for deadlock detection.
+pub enum DeadlockDetectionTrack {
+    /// A mutex was created.
+    MutexCreate {
+        /// The ID of the mutex that was created.
+        mutex_id: usize,
+    },
+    /// A mutex was tried to be locked by a task.
+    MutexTryLock {
+        /// The ID of the task that tried to lock the mutex.
+        t_id: usize,
+        /// The ID of the mutex that was tried to be locked.
+        mutex_id: usize,
+    },
+    /// A mutex was locked by a task.
+    MutexLock {
+        /// The ID of the task that locked the mutex.
+        t_id: usize,
+        /// The ID of the mutex that was locked.
+        mutex_id: usize,
+    },
+    /// A mutex was unlocked by a task.
+    MutexUnlock {
+        /// The ID of the task that unlocked the mutex.
+        t_id: usize,
+        /// The ID of the mutex that was unlocked.
+        mutex_id: usize,
+    },
+    /// A semaphore was created.
+    SemCreate {
+        /// The ID of the semaphore that was created.
+        sem_id: usize,
+        /// The initial count of the semaphore.
+        count: usize,
+    },
+    /// A semaphore was tried to be downed by a task.
+    SemTryDown {
+        /// The ID of the task that tried to down the semaphore.
+        t_id: usize,
+        /// The ID of the semaphore that was tried to be downed.
+        sem_id: usize,
+    },
+    /// A semaphore was downed by a task.
+    SemDown {
+        /// The ID of the task that downed the semaphore.
+        t_id: usize,
+        /// The ID of the semaphore that was downed.
+        sem_id: usize,
+    },
+    /// A semaphore was uped by a task.
+    SemUp {
+        /// The ID of the task that uped the semaphore.
+        t_id: usize,
+        /// The ID of the semaphore that was uped.
+        sem_id: usize,
+    },
+}
+
+impl DeadlockDetector {
+    /// Create a new deadlock detector with zero resources.
+    pub fn new() -> Self {
+        Self {
+            t_num: 1,
+            mutex_num: 0,
+            sem_num: 0,
+            mutex_available: BTreeSet::new(),
+            mutex_allocated: BTreeMap::new(),
+            mutex_need: BTreeMap::new(),
+            sem_available: BTreeMap::new(),
+            sem_allocated: BTreeMap::new(),
+            sem_need: BTreeMap::new(),
+        }
+    }
+    /// Track a deadlock detection track, updating the internal state.
+    pub fn track(&mut self, track: DeadlockDetectionTrack) {
+        match track {
+            DeadlockDetectionTrack::MutexCreate { mutex_id } => {
+                self.mutex_available.insert(mutex_id);
+            }
+            DeadlockDetectionTrack::MutexTryLock { t_id, mutex_id } => {
+                self.t_num = self.t_num.max(t_id + 1);
+                self.mutex_need.entry(t_id).or_default().insert(mutex_id);
+            }
+            DeadlockDetectionTrack::MutexLock { t_id, mutex_id } => {
+                self.mutex_available.remove(&mutex_id);
+                self.mutex_need.remove(&mutex_id);
+                self.mutex_allocated
+                    .entry(t_id)
+                    .or_default()
+                    .insert(mutex_id);
+            }
+            DeadlockDetectionTrack::MutexUnlock { t_id, mutex_id } => {
+                self.mutex_allocated
+                    .get_mut(&t_id)
+                    .unwrap()
+                    .remove(&mutex_id);
+                self.mutex_available.insert(mutex_id);
+            }
+            DeadlockDetectionTrack::SemCreate { sem_id, count } => {
+                self.sem_available.insert(sem_id, count);
+            }
+            DeadlockDetectionTrack::SemTryDown { t_id, sem_id } => {
+                self.t_num = self.t_num.max(t_id + 1);
+                self.sem_need.entry(t_id).or_default().insert(sem_id);
+            }
+            DeadlockDetectionTrack::SemDown { t_id, sem_id } => {
+                self.sem_available.entry(sem_id).and_modify(|c| *c -= 1);
+                self.sem_need.remove(&t_id);
+                self.sem_allocated
+                    .entry(t_id)
+                    .or_default()
+                    .entry(sem_id)
+                    .and_modify(|c| *c += 1)
+                    .or_insert(1);
+            }
+            DeadlockDetectionTrack::SemUp { t_id, sem_id } => {
+                self.sem_available.entry(sem_id).and_modify(|c| *c += 1);
+                self.sem_allocated
+                    .get_mut(&t_id)
+                    .unwrap()
+                    .entry(sem_id)
+                    .and_modify(|c| *c -= 1);
+            }
+        }
+    }
+    /// Detect deadlock by checking mutex and semaphore needs.
+    pub fn detect_deadlock(&mut self) -> bool {
+        let mut mutex_finished = vec![false; self.t_num];
+        let mut mutex_work = self.mutex_available.clone();
+        while let Some(t_id) = (0..self.t_num).find(|t_id| {
+            !mutex_finished[*t_id] && {
+                if let Some(need) = self.mutex_need.get(&t_id) {
+                    need.iter().all(|m_id| mutex_work.contains(m_id))
+                } else {
+                    true
+                }
+            }
+        }) {
+            mutex_finished[t_id] = true;
+            if let Some(allocated) = self.mutex_allocated.get(&t_id) {
+                mutex_work.append(&mut allocated.clone());
+            }
+        }
+        if mutex_finished.iter().any(|f| !*f) {
+            return true;
+        }
+
+        let mut sem_finished = vec![false; self.t_num];
+        let mut sem_work = self.sem_available.clone();
+        while let Some(t_id) = (0..self.t_num).find(|t_id| {
+            !sem_finished[*t_id] && {
+                if let Some(need) = self.sem_need.get(t_id) {
+                    need.iter().all(|s_id| sem_work[s_id] > 0)
+                } else {
+                    true
+                }
+            }
+        }) {
+            sem_finished[t_id] = true;
+            if let Some(allocated) = self.sem_allocated.get(&t_id) {
+                for (s_id, n) in allocated.iter() {
+                    sem_work.entry(*s_id).and_modify(|v| *v += n).or_insert(*n);
+                }
+            }
+        }
+        if sem_finished.iter().any(|f| !*f) {
+            return true;
+        }
+        false
+    }
 }
 
 impl ProcessControlBlockInner {
@@ -81,6 +279,14 @@ impl ProcessControlBlockInner {
     /// get a task with tid in this process
     pub fn get_task(&self, tid: usize) -> Arc<TaskControlBlock> {
         self.tasks[tid].as_ref().unwrap().clone()
+    }
+    /// enable deadlock detection for this process
+    pub fn enable_deadlock_detect(&mut self, enable: bool) {
+        if enable {
+            self.deadlock_detector = Some(DeadlockDetector::new());
+        } else {
+            self.deadlock_detector = None;
+        }
     }
 }
 
@@ -119,6 +325,7 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detector: None,
                 })
             },
         });
@@ -245,6 +452,7 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detector: None,
                 })
             },
         });
